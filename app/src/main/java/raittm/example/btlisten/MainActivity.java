@@ -330,7 +330,7 @@ public class MainActivity extends AppCompatActivity {
             int avail=0;
             boolean waitingForLength=true;
             while (!finished) {
-                //synchronized (MainActivity.this)
+                //synchronized (mBluetoothAdapter)
                 {
                     try {
                         if (waitingForLength) {
@@ -355,6 +355,7 @@ public class MainActivity extends AppCompatActivity {
                                 if (D) Log.d(TAG, "" + keyvalue[0] + " " + keyvalue[1]);
 
                                 if (keyvalue[0].equals("NowPlaying")) {
+                                    mHandler.obtainMessage(CMD_STOP).sendToTarget();
                                     mHandler.obtainMessage(CMD_FILEINFO, keyvalue[1]).sendToTarget();
                                 } else if (keyvalue[0].equals("FileSize")) {
                                     mHandler.obtainMessage(CMD_FILESIZE, keyvalue[1]).sendToTarget();
@@ -384,7 +385,7 @@ public class MainActivity extends AppCompatActivity {
                     } catch (IOException e) {
                         Log.e(TAG, "Problem reading control stream " + e);
 
-                        // TODO: should restart the Accept() server to allow reconnect
+                        mHandler.obtainMessage(CMD_DISCONNECT).sendToTarget();
 
                         break;
                     } catch (InterruptedException e) {
@@ -429,75 +430,77 @@ public class MainActivity extends AppCompatActivity {
 
         @Override
         public void handleMessage(Message msg) {
-            TextView nowPlayingLabel=(TextView) findViewById(R.id.nowPlaying);
+            TextView nowPlayingLabel = (TextView) findViewById(R.id.nowPlaying);
 
+            synchronized (MainActivity.this)
+            {
             switch (msg.what) {
                 case CMD_FILEINFO:
-                    s=((String)msg.obj);
+                    s = ((String) msg.obj);
                     nowPlayingLabel.setText(s);
 
                     break;
                 case CMD_FILESIZE:
-                    expectedFileSize=Long.parseLong((String)msg.obj);
+                    expectedFileSize = Long.parseLong((String) msg.obj);
 
                     break;
                 case CMD_BUFFERSTART:
-                    if (mDataConnectThread!=null) {
-                        mDataConnectThread.cancel();
-                        mDataConnectThread=null;
-                    }
-                    if (mDataThread!=null) {
+                    if (mDataThread != null) {
                         mDataThread.cancel();
-                        mDataThread=null;
+                        mDataThread = null;
                     }
-                    mDataConnectThread=new DataConnectThread(mControlThread.mmSocket.getRemoteDevice(), s, expectedFileSize);
+                    if (mDataConnectThread != null) {
+                        mDataConnectThread.cancel();
+                        mDataConnectThread = null;
+                    }
+
+                    mDataConnectThread = new DataConnectThread(mControlThread.mmSocket.getRemoteDevice(), s, expectedFileSize);
                     mDataConnectThread.start();
 
                     break;
                 case CMD_BUFFEREND:
-                    if (mDataThread!=null) {
+                    if (mDataThread != null) {
                         mDataThread.cancel();
-                        mDataThread=null;
+                        mDataThread = null;
                     }
 
                     break;
                 case CMD_PLAY:
                     // start a PlayThread
-                    if (mPlayThread!=null) {
-                       mPlayThread.cancel();
+                    if (mPlayThread != null) {
+                        mPlayThread.cancel();
 
-                        while(mPlayThread.isAlive());
+                        while (mPlayThread.isAlive()) ;
 
-                        mPlayThread=null;
+                        mPlayThread = null;
                     }
                     mPlayThread = new PlayThread(new File(getCacheDir(), s));
                     mPlayThread.start();
                     break;
                 case CMD_STOP:
-                    if (mPlayThread!=null) {
+                    if (mPlayThread != null) {
                         mPlayThread.cancel();
 
-                        while(mPlayThread.isAlive());
+                        while (mPlayThread.isAlive()) ;
 
-                        mPlayThread=null;
+                        mPlayThread = null;
                     }
                     break;
                 case CMD_PAUSE:
-                    if (mPlayThread!=null) {
+                    if (mPlayThread != null) {
                         if (mPlayThread.mediaPlayer.isPlaying()) {
                             mPlayThread.mediaPlayer.pause();
-                        }
-                        else {
+                        } else {
                             mPlayThread.mediaPlayer.start();
                         }
 
                     }
                     break;
                 case CMD_VOLUMEUP:
-                    am.setStreamVolume(AudioManager.STREAM_MUSIC, am.getStreamVolume(AudioManager.STREAM_MUSIC)+AudioManager.ADJUST_RAISE, AudioManager.FLAG_REMOVE_SOUND_AND_VIBRATE);
+                    am.setStreamVolume(AudioManager.STREAM_MUSIC, am.getStreamVolume(AudioManager.STREAM_MUSIC) + AudioManager.ADJUST_RAISE, AudioManager.FLAG_REMOVE_SOUND_AND_VIBRATE);
                     break;
                 case CMD_VOLUMEDOWN:
-                    am.setStreamVolume(AudioManager.STREAM_MUSIC, am.getStreamVolume(AudioManager.STREAM_MUSIC)+AudioManager.ADJUST_LOWER, AudioManager.FLAG_REMOVE_SOUND_AND_VIBRATE);
+                    am.setStreamVolume(AudioManager.STREAM_MUSIC, am.getStreamVolume(AudioManager.STREAM_MUSIC) + AudioManager.ADJUST_LOWER, AudioManager.FLAG_REMOVE_SOUND_AND_VIBRATE);
                     break;
                 case CMD_DISCONNECT:
                     cleanUp();
@@ -512,15 +515,16 @@ public class MainActivity extends AppCompatActivity {
                 case STS_PLAYFINISHED:
                     if (mControlThread != null) mControlThread.sendPlayFinished();
 
+                    if (mDataThread != null) {
+                        mDataThread.cancel();
+                        mDataThread = null;
+                    }
+
                     nowPlayingLabel.setText("Nothing to play");
                     break;
 
                 case STS_CONNECTED:
                     nowPlayingLabel.setText("Connected - nothing to play");
-                    break;
-
-                case STS_DISCONNECTED:
-                    nowPlayingLabel.setText("Disconnected");
                     break;
 
                 case STS_CURRENTPOS:
@@ -530,7 +534,7 @@ public class MainActivity extends AppCompatActivity {
                 default:
 
             }
-
+        }
         }
     };
 
@@ -571,9 +575,11 @@ public class MainActivity extends AppCompatActivity {
             mDataThread.setPriority(Process.THREAD_PRIORITY_BACKGROUND);
             mDataThread.start();
 
+            if (D) Log.d(TAG,"END DataConnectThread");
         }
 
         public void cancel() {
+            if (D) Log.d(TAG,"Cancelling DataConnectThread");
             try {
                 mmSocket.close();
             } catch (IOException e) {Log.d(TAG,"Problem cancelling DataConnect socket");}
@@ -630,40 +636,45 @@ public class MainActivity extends AppCompatActivity {
             int bytes;
             int avail;
 
-            while (true) {
+            finished=false;
+            while (!finished) {
                 try {
                     avail=mmInStream.available();
                     if (avail > 0) {
-                        if (avail > buffer.length) {
-                            bytes = mmInStream.read(buffer, 0, buffer.length);
-                        } else {
-                            bytes = mmInStream.read(buffer, 0, avail);
+                        //synchronized (mBluetoothAdapter)
+                        {
+                            if (avail > buffer.length) {
+                                bytes = mmInStream.read(buffer, 0, buffer.length);
+                            } else {
+                                bytes = mmInStream.read(buffer, 0, avail);
+                            }
                         }
-
                         totbytes += bytes;
 
-                        if (D) Log.d(TAG, "Read " + totbytes);
+                        //if (D) Log.d(TAG, "Read " + totbytes);
 
                         fos.write(buffer, 0, bytes);
 
                         if (totbytes >= mFileSize) {
                             if (D) Log.d(TAG, "Finished buffering in run()");
-                            break;
+                            finished=true;
                         }
                     }
                 } catch (IOException e) {
                     Log.e(TAG, "Problem reading data stream ");
-                    break;
+                    finished=true;
                 }
             }
 
             try {
                 if (fos != null) {
-                    fos.flush();
+                    //fos.flush();
                     fos.close();
                     fos = null;
                 }
             } catch (IOException e) {Log.d(TAG,"Problem closing stream");}
+
+            if (D) Log.d(TAG,"END DataThread");
         }
 /*
         TimerTask timerDelayStopBuffering;
@@ -701,6 +712,8 @@ public class MainActivity extends AppCompatActivity {
 
 */
         public void cancel() {
+            if (D) Log.d(TAG,"Cancelling DataThread");
+            finished=true;
             try {
                 mmSocket.close();
             } catch (IOException e) {Log.d(TAG,"Problem cancelling DataThread");}
@@ -714,7 +727,7 @@ public class MainActivity extends AppCompatActivity {
         private boolean finished = false;
         private boolean starting = true;
 
-        private int totalBytes = 0;
+        private int totalBytes;
         private int lastBytes;
 
         File musicFile=null;
@@ -724,13 +737,11 @@ public class MainActivity extends AppCompatActivity {
         TimerTask timerOneSecond;
         Timer timer;
 
-        int zero=0;
-        int totalpos=0;
-        int lastpos=0;
-
         public PlayThread(File f) {
 
             lastBytes =0;
+            totalBytes = 0;
+            lastBytes=0;
 
             mediaPlayer=new MediaPlayer();
 
@@ -739,7 +750,7 @@ public class MainActivity extends AppCompatActivity {
         }
 
         public void run() {
-            if (D) Log.d(TAG, "Start playback");
+            if (D) Log.d(TAG, "BEGIN PlayThread");
 
             mediaPlayer.setOnCompletionListener(new MediaPlayer.OnCompletionListener() {
                 @Override
@@ -754,6 +765,10 @@ public class MainActivity extends AppCompatActivity {
 
                         if (lastBytes==totalBytes) {
                             finished = true;
+
+                            if (totalBytes!=mDataThread.mFileSize) {
+                                if (D) Log.d(TAG, "Didn't get all bytes for file - bluetooth read/write blocked?");
+                            }
 
                             mHandler.obtainMessage(STS_PLAYFINISHED).sendToTarget();
                         }
@@ -824,25 +839,34 @@ public class MainActivity extends AppCompatActivity {
             } catch (IOException e) {
                 Log.d(TAG, "Problem closing musicfile inputstream");
             }
+            if (D) Log.d(TAG,"END PlayThread");
         }
 
         public void cancel() {
+            Log.d(TAG, "Cancelling PlayThread");
 
             if (timer!=null) timer.cancel();
+
+            finished = true;
 
             if (mediaPlayer != null) {
                 mediaPlayer.release();
                 mediaPlayer = null;
             }
 
-            finished = true;
-
         }
 
         class TimerOneSecondHandler extends TimerTask
         {
+            int zero;
+            int totalpos;
+            int lastpos;
+
             public TimerOneSecondHandler()
             {
+                zero=0;
+                totalpos=0;
+                lastpos=0;
             }
 
             @Override
@@ -851,7 +875,13 @@ public class MainActivity extends AppCompatActivity {
                 if (mediaPlayer!=null) {
                     int pos=mediaPlayer.getCurrentPosition();
 
-                    //Log.d(TAG,""+zero+" "+lastpos+" "+totalpos);
+                    //Log.i(TAG,""+zero+" "+lastpos+" "+totalpos);
+
+                    int Hours = totalpos / (1000*60*60);
+                    int Minutes = (totalpos % (1000*60*60)) / (1000*60);
+                    int Seconds = ((totalpos % (1000*60*60)) % (1000*60)) / 1000;
+
+                    Log.i(TAG,""+String.format("%02d",Hours)+":"+String.format("%02d",Minutes)+":"+String.format("%02d",Seconds));
 
                     if (lastpos>pos) {
                         zero=totalpos;
@@ -859,7 +889,7 @@ public class MainActivity extends AppCompatActivity {
                     totalpos = zero + pos;
                     lastpos=pos;
 
-                    mHandler.obtainMessage(STS_CURRENTPOS, pos).sendToTarget();
+                    mHandler.obtainMessage(STS_CURRENTPOS, totalpos).sendToTarget();
 
                 }
             }
