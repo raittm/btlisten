@@ -38,7 +38,8 @@ import java.util.UUID;
 
 public class MainActivity extends AppCompatActivity {
     private static final String TAG = "btListen";
-    private static final boolean D=true;
+    private static final boolean D=false;
+    private static final boolean DD=false;
 
     private final UUID DATA_UUID = UUID.fromString("00001101-0000-1000-8000-00805f9b34fb");
     private final UUID CONTROL_UUID = UUID.fromString("00001101-0000-1000-8000-00805f9b34fc");
@@ -62,12 +63,16 @@ public class MainActivity extends AppCompatActivity {
     public static final int STS_CONNECTED=103;
     public static final int STS_DISCONNECTED=104;
     public static final int STS_CURRENTPOS=105;
+    public static final int STS_HEARTBEAT=106;
 
     // Constants that indicate the current connection state
     public static final int STATE_NONE = 0;       // we're doing nothing
     public static final int STATE_LISTEN = 1;     // now listening for incoming connections
     public static final int STATE_CONNECTING = 2; // now initiating an outgoing connection
     public static final int STATE_CONNECTED = 3;  // now connected to a remote device
+
+    public static final int DATA_ACK_SIZE=32*1024; // believe this is half the bluetooth stack buffer size
+    public static final int DATA_BUFFER_SIZE=DATA_ACK_SIZE;
 
     PowerManager.WakeLock wakeLock;
     NotificationManager nm;
@@ -352,7 +357,7 @@ public class MainActivity extends AppCompatActivity {
                                 waitingForLength = true;
 
                                 String[] keyvalue = s.toString().split("=");
-                                if (D) Log.d(TAG, "" + keyvalue[0] + " " + keyvalue[1]);
+                                //if (D) Log.d(TAG, "" + keyvalue[0] + " " + keyvalue[1]);
 
                                 if (keyvalue[0].equals("NowPlaying")) {
                                     mHandler.obtainMessage(CMD_STOP).sendToTarget();
@@ -376,6 +381,10 @@ public class MainActivity extends AppCompatActivity {
                                         mHandler.obtainMessage(CMD_DISCONNECT).sendToTarget();
                                     } else if (keyvalue[1].equals("Pause")) {
                                         mHandler.obtainMessage(CMD_PAUSE).sendToTarget();
+                                    }
+                                } else if (keyvalue[0].equals("Status")) {
+                                    if (keyvalue[1].equals("Heartbeat")) {
+                                        mHandler.obtainMessage(STS_HEARTBEAT).sendToTarget();
                                     }
                                 }
 
@@ -417,7 +426,7 @@ public class MainActivity extends AppCompatActivity {
         public void sendCurrentPos(int p) {
             String ss="CurrentPos="+p;
             try {
-                if (D) Log.d(TAG,""+ss);
+                if (DD) Log.d(TAG,""+ss);
                 dos.writeInt(ss.length());
                 dos.writeChars(ss);
             } catch (IOException e) {}
@@ -528,11 +537,14 @@ public class MainActivity extends AppCompatActivity {
                     break;
 
                 case STS_CURRENTPOS:
-                    //if (mControlThread!=null) mControlThread.sendCurrentPos((Integer)msg.obj);
+                    if (mControlThread!=null) mControlThread.sendCurrentPos((Integer)msg.obj);
+                    break;
+
+                case STS_HEARTBEAT:
+
                     break;
 
                 default:
-
             }
         }
         }
@@ -594,12 +606,14 @@ public class MainActivity extends AppCompatActivity {
         private FileOutputStream fos=null;
 
         private boolean finished=false;
-        private boolean buffering=false;
 
         int totbytes=0;
         long mFileSize=0;
 
         File localFile=null;
+
+        //TimerTask timerOneSecond;
+        //Timer timer;
 
         public DataThread(BluetoothSocket socket, String remoteFilename, long remoteFileSize) {
             mmSocket = socket;
@@ -631,14 +645,21 @@ public class MainActivity extends AppCompatActivity {
         public void run() {
             if (D) Log.d(TAG, "BEGIN DataThread");
 
-            byte[] buffer=new byte[32*1024];
+            byte[] buffer=new byte[DATA_BUFFER_SIZE];
 
+            int lastbytes=0;
             int bytes;
             int avail;
 
+            //timer=new Timer();
+            //timerOneSecond = new TimerOneSecondHandler();
+            //timer.scheduleAtFixedRate(timerOneSecond, 1000, 1000);
+
             finished=false;
+            sendAck();
             while (!finished) {
                 try {
+/*
                     avail=mmInStream.available();
                     if (avail > 0) {
                         //synchronized (mBluetoothAdapter)
@@ -660,6 +681,28 @@ public class MainActivity extends AppCompatActivity {
                             finished=true;
                         }
                     }
+*/
+
+
+                    bytes = mmInStream.read(buffer, 0, buffer.length);
+
+                    if (bytes!=-1) {
+                        totbytes += bytes;
+
+                        if (DD) Log.d(TAG, "Read " + totbytes);
+
+                        fos.write(buffer, 0, bytes);
+
+                        if ((totbytes-lastbytes)>=DATA_ACK_SIZE) {
+                            sendAck();
+                            lastbytes=totbytes;
+                        }
+                    }
+
+                    if (totbytes >= mFileSize) {
+                        if (D) Log.d(TAG, "Finished buffering in run() - read "+totbytes);
+                        finished=true;
+                    }
                 } catch (IOException e) {
                     Log.e(TAG, "Problem reading data stream ");
                     finished=true;
@@ -674,52 +717,50 @@ public class MainActivity extends AppCompatActivity {
                 }
             } catch (IOException e) {Log.d(TAG,"Problem closing stream");}
 
+            //timer.cancel();
+
             if (D) Log.d(TAG,"END DataThread");
         }
-/*
-        TimerTask timerDelayStopBuffering;
-        Timer timer;
 
-        class TimerDelayStopBuffering extends TimerTask
-        {
-            public TimerDelayStopBuffering()
-            {
-            }
-
-            @Override
-            public void run()
-            {
-                if (D) Log.d(TAG, "Finished buffering, read " + totbytes);
-
-                buffering=false;
-
-                try {
-                    if (fos!=null) { fos.flush();fos.close(); fos=null;}
-                } catch (IOException e) {Log.d(TAG,"Problem in TimerDelayStopBuffering");}
-
-            }
-        }
-
-        public void stopBuffering() {
-            if (D) Log.d(TAG, "Stop buffering");
-
-            timer=new Timer();
-            timerDelayStopBuffering = new TimerDelayStopBuffering();
-            timer.schedule(timerDelayStopBuffering, 5000);
-
-            if (D) Log.d(TAG,"Delaying");
-        }
-
-*/
         public void cancel() {
-            if (D) Log.d(TAG,"Cancelling DataThread");
+            if (D) Log.d(TAG, "Cancelling DataThread");
+
+            //if (timer!=null) timer.cancel();
+
             finished=true;
             try {
                 mmSocket.close();
             } catch (IOException e) {Log.d(TAG,"Problem cancelling DataThread");}
         }
 
+        public void sendAck() {
+            String ss="Status=DataAck";
+            try {
+                if (DD) Log.d(TAG,ss);
+                DataOutputStream dos = new DataOutputStream(mmOutStream);
+                dos.writeInt(ss.length());
+                dos.writeChars(ss);
+            } catch (IOException e) {Log.d(TAG,"Problem sending DataThread heartbeat");}
+        }
+/*
+        class TimerOneSecondHandler extends TimerTask
+        {
+            public TimerOneSecondHandler()
+            {
+            }
 
+            @Override
+            public void run()
+            {
+                String ss="Sts=Heartbeat";
+                try {
+                    DataOutputStream dos = new DataOutputStream(mmOutStream);
+                    dos.writeInt(ss.length());
+                    dos.writeChars(ss);
+                } catch (IOException e) {Log.d(TAG,"Problem sending DataThread heartbeat");}
+            }
+        }
+*/
     }
 
     private class PlayThread extends Thread {
@@ -786,6 +827,9 @@ public class MainActivity extends AppCompatActivity {
                         Log.e(TAG, "Problem playing next audio fragment");
 
                         // due to end of file or interrupted stream
+                        finished = true;
+
+                        mHandler.obtainMessage(STS_PLAYFINISHED).sendToTarget();
                     }
 
                 }
@@ -890,7 +934,6 @@ public class MainActivity extends AppCompatActivity {
                     lastpos=pos;
 
                     mHandler.obtainMessage(STS_CURRENTPOS, totalpos).sendToTarget();
-
                 }
             }
         }
